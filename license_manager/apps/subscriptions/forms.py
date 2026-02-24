@@ -29,6 +29,7 @@ from license_manager.apps.subscriptions.models import (
     SubscriptionPlanRenewal,
 )
 from license_manager.apps.subscriptions.utils import (
+    is_salesforce_integration_enabled,
     localized_utcnow,
     verify_sf_opportunity_product_line_item,
 )
@@ -84,6 +85,11 @@ class SubscriptionPlanForm(forms.ModelForm):
             Locate the appropriate Salesforce Opportunity Line Item record and copy it here."""
         )
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_line_item', None)
 
     def _validate_enterprise_catalog_uuid(self):
         """
@@ -165,18 +171,21 @@ class SubscriptionPlanForm(forms.ModelForm):
             )
             return False
 
-        if (
-                product.plan_type.sf_id_required
-                and self.cleaned_data.get('salesforce_opportunity_line_item') is None
-                or not verify_sf_opportunity_product_line_item(self.cleaned_data.get(
-                'salesforce_opportunity_line_item'))
-        ):
-            self._log_validation_error('no SF ID')
-            self.add_error(
-                'salesforce_opportunity_line_item',
-                'You must specify Salesforce ID for selected product. It must start with \'00k\'.',
-            )
-            return False
+        if is_salesforce_integration_enabled():
+            salesforce_opportunity_line_item = self.cleaned_data.get('salesforce_opportunity_line_item')
+            if (
+                    (product.plan_type.sf_id_required and salesforce_opportunity_line_item is None)
+                    or (
+                        salesforce_opportunity_line_item is not None
+                        and not verify_sf_opportunity_product_line_item(salesforce_opportunity_line_item)
+                    )
+            ):
+                self._log_validation_error('no SF ID')
+                self.add_error(
+                    'salesforce_opportunity_line_item',
+                    'You must specify Salesforce ID for selected product. It must start with \'00k\'.',
+                )
+                return False
 
         if settings.VALIDATE_FORM_EXTERNAL_FIELDS and self.instance.enterprise_catalog_uuid and \
                 not self._validate_enterprise_catalog_uuid():
@@ -201,6 +210,11 @@ class SubscriptionPlanRenewalForm(forms.ModelForm):
             " Note that this is not the same Salesforce Opportunity ID associated with the linked subscription."
         )
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_id', None)
 
     def is_valid(self):
         # Perform original validation and return if false
@@ -236,13 +250,14 @@ class SubscriptionPlanRenewalForm(forms.ModelForm):
             )
             return False
 
-        if form_future_salesforce_opportunity_line_item is None or \
-                not verify_sf_opportunity_product_line_item(form_future_salesforce_opportunity_line_item):
-            self.add_error(
-                'salesforce_opportunity_id',
-                'You must specify Salesforce ID for the renewed product. It must start with \'00k\'.',
-            )
-            return False
+        if is_salesforce_integration_enabled():
+            if form_future_salesforce_opportunity_line_item is None or \
+                    not verify_sf_opportunity_product_line_item(form_future_salesforce_opportunity_line_item):
+                self.add_error(
+                    'salesforce_opportunity_id',
+                    'You must specify Salesforce ID for the renewed product. It must start with \'00k\'.',
+                )
+                return False
 
         return True
 

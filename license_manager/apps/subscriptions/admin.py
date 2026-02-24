@@ -52,6 +52,13 @@ def get_related_object_link(admin_viewname, object_pk, object_str):
     ))
 
 
+def is_salesforce_enabled():
+    """
+    Returns whether Salesforce-specific UI fields should be visible.
+    """
+    return getattr(settings, 'ENABLE_SALESFORCE_INTEGRATION', True)
+
+
 def _bulk_delete_request_handler(request, queryset, model_name, table_name, delete_action_method):
     """
     Delete a large number of model instances, without listing each instance on the confirmation page.
@@ -351,6 +358,12 @@ class SubscriptionPlanAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         if obj is None:
             for skip_field in self.fields_skip_create:
                 fields.remove(skip_field)
+
+        if not is_salesforce_enabled():
+            fields = [
+                field for field in fields
+                if field not in {'salesforce_opportunity_id', 'salesforce_opportunity_line_item'}
+            ]
 
         return fields
 
@@ -779,6 +792,18 @@ class PlanTypeAdmin(admin.ModelAdmin):
         'internal_use_only',
     )
 
+    def get_fields(self, request, obj=None):
+        fields = list(super().get_fields(request, obj))
+        if not is_salesforce_enabled():
+            fields = [field for field in fields if field != 'sf_id_required']
+        return fields
+
+    def get_list_display(self, request):
+        list_display = list(super().get_list_display(request))
+        if not is_salesforce_enabled():
+            list_display = [field for field in list_display if field != 'sf_id_required']
+        return list_display
+
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
@@ -814,6 +839,18 @@ class ProductAdmin(admin.ModelAdmin):
         'netsuite_id',
         'salesforce_product_id',
     )
+
+    def get_fields(self, request, obj=None):
+        fields = list(super().get_fields(request, obj))
+        if not is_salesforce_enabled():
+            fields = [field for field in fields if field != 'salesforce_product_id']
+        return fields
+
+    def get_list_display(self, request):
+        list_display = list(super().get_list_display(request))
+        if not is_salesforce_enabled():
+            list_display = [field for field in list_display if field != 'salesforce_product_id']
+        return list_display
 
 
 @admin.register(Notification)

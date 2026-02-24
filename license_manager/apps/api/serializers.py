@@ -22,6 +22,7 @@ from license_manager.apps.subscriptions.models import (
     SubscriptionPlanRenewal,
 )
 from license_manager.apps.subscriptions.utils import (
+    is_salesforce_integration_enabled,
     validate_enterprise_catalog_uuid,
     verify_sf_opportunity_product_line_item,
 )
@@ -55,6 +56,11 @@ class MinimalSubscriptionPlanSerializer(serializers.ModelSerializer):
     )
 
     plan_type = serializers.CharField(source='product.plan_type', read_only=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_line_item', None)
 
     class Meta:
         model = SubscriptionPlan
@@ -155,6 +161,11 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
 
     salesforce_opportunity_line_item = serializers.CharField(required=True, allow_null=True)
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_line_item', None)
+
     class Meta:
         model = SubscriptionPlan
         fields = MinimalSubscriptionPlanSerializer.Meta.fields + [
@@ -229,12 +240,13 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
                 f'Non-test subscriptions may not have more than {MAX_NUM_LICENSES} licenses',
             )
 
-        if attrs.get('salesforce_opportunity_line_item') is None:
-            if product.plan_type.sf_id_required:
-                raise InvalidSubscriptionPlanPayloadError('You must specify Salesforce ID for selected product.')
-        else:
-            if not verify_sf_opportunity_product_line_item(attrs.get('salesforce_opportunity_line_item')):
-                raise InvalidSubscriptionPlanPayloadError("Invalid Salesforce ID format. It must start with '00k'.")
+        if is_salesforce_integration_enabled():
+            if attrs.get('salesforce_opportunity_line_item') is None:
+                if product.plan_type.sf_id_required:
+                    raise InvalidSubscriptionPlanPayloadError('You must specify Salesforce ID for selected product.')
+            else:
+                if not verify_sf_opportunity_product_line_item(attrs.get('salesforce_opportunity_line_item')):
+                    raise InvalidSubscriptionPlanPayloadError("Invalid Salesforce ID format. It must start with '00k'.")
 
         if settings.VALIDATE_FORM_EXTERNAL_FIELDS and attrs.get('enterprise_catalog_uuid') and \
             not validate_enterprise_catalog_uuid(
@@ -314,12 +326,14 @@ class SubscriptionPlanUpdateSerializer(SubscriptionPlanCreateSerializer):
 
         subscription = self.context.get('subscription')
         product = attrs.get('product')
-        if product:
+        if product and is_salesforce_integration_enabled():
+            salesforce_opportunity_line_item = attrs.get('salesforce_opportunity_line_item')
             if (
-                product.plan_type.sf_id_required
-                and attrs.get('salesforce_opportunity_line_item') is None
-                or not verify_sf_opportunity_product_line_item(attrs.get(
-                    'salesforce_opportunity_line_item'))
+                (product.plan_type.sf_id_required and salesforce_opportunity_line_item is None)
+                or (
+                    salesforce_opportunity_line_item is not None
+                    and not verify_sf_opportunity_product_line_item(salesforce_opportunity_line_item)
+                )
             ):
                 raise InvalidSubscriptionPlanPayloadError(
                     'You must specify Salesforce ID for selected product. It must start with \'00k\'.',
@@ -752,6 +766,11 @@ class LicenseAdminAssignActionSerializer(CustomTextWithMultipleEmailsSerializer)
             'notify_users',
         ]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('user_sfids', None)
+
     def validate(self, attrs):
         user_emails = attrs.get('user_emails')
         user_sfids = attrs.get('user_sfids')
@@ -870,6 +889,11 @@ class SubscriptionPlanRenewalProvisioningAdminResponseSerializer(serializers.Mod
         help_text='UUID of the enterprise customer associated with this renewal.',
     )
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_id', None)
+
     class Meta:
         model = SubscriptionPlanRenewal
         fields = [
@@ -912,6 +936,11 @@ class SubscriptionPlanRenewalProvisioningAdminCreateRequestSerializer(serializer
         allow_null=True,
         help_text="UUID of the new/future subscription plan (optional).",
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_id', None)
 
     class Meta:
         model = SubscriptionPlanRenewal
@@ -1058,6 +1087,11 @@ class SubscriptionPlanRenewalProvisioningAdminUpdateRequestSerializer(serializer
         required=False,
         allow_null=True,
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('salesforce_opportunity_id', None)
 
     class Meta:
         model = SubscriptionPlanRenewal

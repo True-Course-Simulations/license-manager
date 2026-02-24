@@ -161,6 +161,13 @@ def verify_sf_opportunity_product_line_item(salesforce_opportunity_line_item):
     return re.search(r'^00k', salesforce_opportunity_line_item)
 
 
+def is_salesforce_integration_enabled():
+    """
+    Returns whether Salesforce-specific UI/API behavior should be enabled.
+    """
+    return getattr(settings, 'ENABLE_SALESFORCE_INTEGRATION', True)
+
+
 def validate_enterprise_catalog_uuid(enterprise_catalog_uuid, enterprise_customer_uuid):
     """
     Verifies that the enterprise customer has a catalog with the given enterprise_catalog_uuid.

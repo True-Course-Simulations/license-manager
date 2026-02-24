@@ -166,6 +166,10 @@ REST_FRAMEWORK = {
 # Maintain a list of user ids to opt-out of API throttle limits
 PRIVELEGED_USER_IDS = []
 
+# Feature flag to enable/disable Salesforce-specific fields and validation.
+# Keep enabled by default to preserve current behavior.
+ENABLE_SALESFORCE_INTEGRATION = os.environ.get('ENABLE_SALESFORCE_INTEGRATION', 'true').lower() == 'true'
+
 # Internationalization
 # https://docs.djangoproject.com/en/dev/topics/i18n/
 
