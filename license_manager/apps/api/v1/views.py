@@ -66,6 +66,7 @@ from license_manager.apps.subscriptions.exceptions import (
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
     FeaturePermission,
+    FeatureRole,
     License,
     SubscriptionLicenseSource,
     SubscriptionLicenseSourceType,
@@ -75,6 +76,7 @@ from license_manager.apps.subscriptions.models import (
 )
 from license_manager.apps.subscriptions.services.licenses import (
     assign_license,
+    find_available_license,
 )
 from license_manager.apps.subscriptions.utils import (
     chunks,
@@ -1046,14 +1048,15 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
 
         Returns a QuerySet of licenses that are assigned.
         """
-        available_licenses = subscription_plan.unassigned_licenses.filter(
-            consumption_date__isnull=True,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gte=timezone.now()),
-        )[:len(user_emails)]
         assigned_licenses = []
-        for unassigned_license, email in zip(available_licenses, user_emails):
-            assignment_result = assign_license(unassigned_license, {'email': email})
+        for email in user_emails:
+            candidate_license = find_available_license(
+                enterprise_id=subscription_plan.enterprise_customer_uuid,
+                plan_id=subscription_plan.uuid,
+            )
+            if not candidate_license:
+                break
+            assignment_result = assign_license(candidate_license, {'email': email})
             assigned_licenses.append(assignment_result['license'])
         return assigned_licenses
 
@@ -1881,6 +1884,34 @@ class LicenseAvailabilityByFeatureView(APIView):
             ),
             ).order_by('slug')
 
+        roles = FeatureRole.objects.filter(
+            licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+        ).annotate(
+            total=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                ),
+                distinct=True,
+            ),
+            consumed=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                    licenses__consumption_date__isnull=False,
+                ),
+                distinct=True,
+            ),
+            remaining=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                    licenses__consumption_date__isnull=True,
+                ) & (Q(licenses__expires_at__isnull=True) | Q(licenses__expires_at__gte=now)),
+                distinct=True,
+            ),
+        ).order_by('slug')
+
         response_data = {
             'feature_permissions': {
                 feature.slug: {
@@ -1888,6 +1919,13 @@ class LicenseAvailabilityByFeatureView(APIView):
                     'consumed': feature.consumed,
                     'remaining': feature.remaining,
                 } for feature in features
+            },
+            'feature_roles': {
+                role.slug: {
+                    'total': role.total,
+                    'consumed': role.consumed,
+                    'remaining': role.remaining,
+                } for role in roles
             }
         }
         return Response(response_data, status=status.HTTP_200_OK)
@@ -1914,29 +1952,18 @@ class LicenseFeatureAssignView(APIView):
         payload = request_serializer.validated_data
 
         enterprise_uuid = payload.get('enterprise_id') or payload.get('enterprise_customer_uuid')
-        now = timezone.now()
 
-        available_licenses = License.objects.filter(
-            subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
-            consumption_date__isnull=True,
-        ).filter(
-            Q(expires_at__isnull=True) | Q(expires_at__gte=now),
+        candidate_license = find_available_license(
+            enterprise_id=enterprise_uuid,
+            feature_slug=payload.get('feature_slug'),
+            role_slug=payload.get('role_slug'),
+            plan_id=payload.get('plan_id'),
+            user_id=payload.get('user_id'),
         )
-
-        if payload.get('feature_slug'):
-            available_licenses = available_licenses.filter(
-                feature_permissions__slug=payload['feature_slug'],
-            )
-        if payload.get('plan_id'):
-            available_licenses = available_licenses.filter(
-                subscription_plan_id=payload['plan_id'],
-            )
-
-        candidate_license = available_licenses.order_by('created').first()
         if not candidate_license:
             return Response(
-                {'detail': 'No matching unconsumed active license is available.'},
-                status=status.HTTP_404_NOT_FOUND,
+                {'detail': 'No available license matching requested permission/role'},
+                status=status.HTTP_409_CONFLICT,
             )
 
         try:
@@ -1951,6 +1978,8 @@ class LicenseFeatureAssignView(APIView):
             {
                 'license_id': assignment_result['license'].uuid,
                 'granted_feature_slugs': assignment_result['granted_feature_slugs'],
+                'granted_permissions': assignment_result['granted_permissions'],
+                'granted_roles': assignment_result['granted_roles'],
             },
             status=status.HTTP_200_OK,
         )

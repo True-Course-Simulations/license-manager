@@ -585,6 +585,36 @@ class FeaturePermission(TimeStampedModel):
         return self.slug
 
 
+class FeatureRole(TimeStampedModel):
+    """
+    Represents a feature role entitlement attachable to plans/licenses.
+
+    .. no_pii: This model has no PII
+    """
+
+    slug = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=False,
+        null=False,
+    )
+    description = models.TextField(
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        verbose_name = _("Feature Role")
+        verbose_name_plural = _("Feature Roles")
+
+    def __str__(self):
+        return self.slug
+
+
 class SubscriptionPlan(TimeStampedModel):
     """
     Stores top-level information related to an enterprise Subscriptions purchase.
@@ -725,6 +755,11 @@ class SubscriptionPlan(TimeStampedModel):
 
     feature_permissions = models.ManyToManyField(
         FeaturePermission,
+        blank=True,
+        related_name='plans',
+    )
+    feature_roles = models.ManyToManyField(
+        FeatureRole,
         blank=True,
         related_name='plans',
     )
@@ -1347,6 +1382,11 @@ class License(TimeStampedModel):
 
     feature_permissions = models.ManyToManyField(
         FeaturePermission,
+        blank=True,
+        related_name='licenses',
+    )
+    feature_roles = models.ManyToManyField(
+        FeatureRole,
         blank=True,
         related_name='licenses',
     )

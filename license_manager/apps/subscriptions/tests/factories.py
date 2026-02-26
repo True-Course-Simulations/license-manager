@@ -13,6 +13,7 @@ from license_manager.apps.subscriptions.constants import (
 )
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
+    FeatureRole,
     License,
     PlanType,
     Product,
@@ -146,6 +147,17 @@ class LicenseFactory(factory.django.DjangoModelFactory):
     subscription_plan = factory.SubFactory(SubscriptionPlanFactory)
     revoked_date = None
     auto_applied = False
+
+
+class FeatureRoleFactory(factory.django.DjangoModelFactory):
+    """
+    Test factory for the `FeatureRole` model.
+    """
+    slug = factory.LazyAttribute(lambda _: f'role-{uuid4()}')
+    name = factory.LazyAttribute(lambda _: FAKER.word())
+
+    class Meta:
+        model = FeatureRole
 
 
 class UserFactory(factory.django.DjangoModelFactory):

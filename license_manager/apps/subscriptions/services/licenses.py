@@ -3,10 +3,14 @@ from uuid import uuid4
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from license_manager.apps.subscriptions import constants
-from license_manager.apps.subscriptions.models import FeaturePermission, License
+from license_manager.apps.subscriptions.models import (
+    FeaturePermission,
+    License,
+)
 
 
 DEFAULT_CATALOG_FEATURE_SLUG = 'catalog.curated_access'
@@ -43,7 +47,8 @@ def create_licenses_for_purchase(plan, quantity, expires_at=_UNSET):
         resolved_expires_at = expires_at
 
     plan_permissions = list(plan.feature_permissions.all())
-    if not plan_permissions:
+    plan_roles = list(plan.feature_roles.all())
+    if not plan_permissions and not plan_roles:
         plan_permissions = [ensure_default_catalog_feature_permission()]
 
     licenses = [
@@ -60,7 +65,35 @@ def create_licenses_for_purchase(plan, quantity, expires_at=_UNSET):
         for license in licenses
         for permission in plan_permissions
     ])
+    role_through_model = License.feature_roles.through
+    role_through_model.objects.bulk_create([
+        role_through_model(license_id=license.uuid, featurerole_id=role.id)
+        for license in licenses
+        for role in plan_roles
+    ])
     return licenses
+
+
+def find_available_license(enterprise_id, feature_slug=None, role_slug=None, plan_id=None, user_id=None):  # pylint: disable=unused-argument
+    """
+    Find one available (unconsumed, unassigned, active) license matching requested constraints.
+    """
+    now = timezone.now()
+    queryset = License.objects.filter(
+        subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_id,
+        consumption_date__isnull=True,
+        status=constants.UNASSIGNED,
+    ).filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gte=now),
+    )
+    if feature_slug:
+        queryset = queryset.filter(feature_permissions__slug=feature_slug)
+    if role_slug:
+        queryset = queryset.filter(feature_roles__slug=role_slug)
+    if plan_id:
+        queryset = queryset.filter(subscription_plan_id=plan_id)
+
+    return queryset.distinct().order_by('created', 'uuid').first()
 
 
 def _normalize_user(user):
@@ -105,12 +138,17 @@ def assign_license(license_obj, user, assigned_by=None, metadata=None):  # pylin
 
         if locked_license.consumption_date is not None:
             if _is_same_learner(locked_license, target_email, target_lms_user_id):
-                feature_slugs = sorted(
+                permission_slugs = sorted(
                     locked_license.feature_permissions.values_list('slug', flat=True)
+                )
+                role_slugs = sorted(
+                    locked_license.feature_roles.values_list('slug', flat=True)
                 )
                 return {
                     'license': locked_license,
-                    'granted_feature_slugs': feature_slugs,
+                    'granted_feature_slugs': permission_slugs,
+                    'granted_permissions': permission_slugs,
+                    'granted_roles': role_slugs,
                 }
             raise ValidationError('This license has already been consumed and is non-transferable.')
 
@@ -130,12 +168,17 @@ def assign_license(license_obj, user, assigned_by=None, metadata=None):  # pylin
         locked_license.consumption_date = locked_license.consumption_date or now
         locked_license.save()
 
-        feature_slugs = sorted(
+        permission_slugs = sorted(
             locked_license.feature_permissions.values_list('slug', flat=True)
+        )
+        role_slugs = sorted(
+            locked_license.feature_roles.values_list('slug', flat=True)
         )
         return {
             'license': locked_license,
-            'granted_feature_slugs': feature_slugs,
+            'granted_feature_slugs': permission_slugs,
+            'granted_permissions': permission_slugs,
+            'granted_roles': role_slugs,
         }
 
 
@@ -158,4 +201,3 @@ def expire_time_limited_licenses():
         expired_count += 1
 
     return expired_count
-

@@ -35,6 +35,7 @@ from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
     CustomSubscriptionExpirationMessaging,
     FeaturePermission,
+    FeatureRole,
     License,
     LicenseEvent,
     LicenseTransferJob,
@@ -193,6 +194,7 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         'source_id',
         'source_type',
         'feature_permission_slugs',
+        'feature_role_slugs',
     ]
     exclude = ['history', 'renewed_to']
     list_display = (
@@ -203,6 +205,8 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         'is_perpetual',
         'is_expired',
         'consumption_date',
+        'feature_permission_slugs',
+        'feature_role_slugs',
         'assigned_date',
         'activation_date',
         'user_email',
@@ -214,6 +218,8 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
     )
     list_filter = (
         'status',
+        'feature_permissions',
+        'feature_roles',
         PerpetualLicenseFilter,
         ExpiredLicenseFilter,
         ConsumedLicenseFilter,
@@ -231,6 +237,10 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
     @admin.display(description='Feature permissions')
     def feature_permission_slugs(self, instance):
         return ', '.join(sorted(instance.feature_permissions.values_list('slug', flat=True)))
+
+    @admin.display(description='Feature roles')
+    def feature_role_slugs(self, instance):
+        return ', '.join(sorted(instance.feature_roles.values_list('slug', flat=True)))
 
     def get_queryset(self, request):
         """
@@ -383,6 +393,7 @@ class SubscriptionPlanAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         'expiration_date',
         'enterprise_catalog_uuid',
         'feature_permissions',
+        'feature_roles',
         'salesforce_opportunity_line_item',
         'product',
         'revoke_max_percentage',
@@ -597,6 +608,18 @@ class CustomSubscriptionExpirationMessagingAdmin(DjangoQLSearchMixin, admin.Mode
 
 @admin.register(FeaturePermission)
 class FeaturePermissionAdmin(admin.ModelAdmin):
+    list_display = (
+        'slug',
+        'name',
+    )
+    search_fields = (
+        'slug',
+        'name',
+    )
+
+
+@admin.register(FeatureRole)
+class FeatureRoleAdmin(admin.ModelAdmin):
     list_display = (
         'slug',
         'name',

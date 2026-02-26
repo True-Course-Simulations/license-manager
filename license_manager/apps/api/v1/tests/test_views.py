@@ -46,6 +46,7 @@ from license_manager.apps.subscriptions.exceptions import LicenseRevocationError
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
     FeaturePermission,
+    FeatureRole,
     License,
     SubscriptionLicenseSource,
     SubscriptionsFeatureRole,
@@ -53,6 +54,7 @@ from license_manager.apps.subscriptions.models import (
 )
 from license_manager.apps.subscriptions.tests.factories import (
     CustomerAgreementFactory,
+    FeatureRoleFactory,
     LicenseFactory,
     PlanTypeFactory,
     ProductFactory,
@@ -4753,6 +4755,8 @@ def test_license_feature_availability_endpoint_counts(api_client, non_staff_user
 
     feature_a = FeaturePermission.objects.create(slug='ai_chatbot.access', name='AI Chatbot Access')
     feature_b = FeaturePermission.objects.create(slug='analytics.view_dashboard', name='View Dashboard')
+    role_a = FeatureRole.objects.create(slug='ai_chatbot.user', name='AI Chatbot User')
+    role_b = FeatureRole.objects.create(slug='analytics.viewer', name='Analytics Viewer')
 
     now = localized_utcnow()
     perpetual_license = LicenseFactory.create(
@@ -4785,6 +4789,10 @@ def test_license_feature_availability_endpoint_counts(api_client, non_staff_user
     consumed_license.feature_permissions.add(feature_a)
     expired_license.feature_permissions.add(feature_a)
     feature_b_license.feature_permissions.add(feature_b)
+    perpetual_license.feature_roles.add(role_a)
+    consumed_license.feature_roles.add(role_a)
+    expired_license.feature_roles.add(role_a)
+    feature_b_license.feature_roles.add(role_b)
 
     _assign_role_via_jwt_or_db(
         api_client,
@@ -4803,6 +4811,16 @@ def test_license_feature_availability_endpoint_counts(api_client, non_staff_user
         'remaining': 1,
     }
     assert response.data['feature_permissions']['analytics.view_dashboard'] == {
+        'total': 1,
+        'consumed': 0,
+        'remaining': 1,
+    }
+    assert response.data['feature_roles']['ai_chatbot.user'] == {
+        'total': 3,
+        'consumed': 1,
+        'remaining': 1,
+    }
+    assert response.data['feature_roles']['analytics.viewer'] == {
         'total': 1,
         'consumed': 0,
         'remaining': 1,
@@ -4860,3 +4878,121 @@ def test_license_feature_assign_endpoint_selects_feature_license(api_client, non
     target_license.refresh_from_db()
     assert target_license.consumption_date is not None
     assert target_license.user_email == learner_email
+
+
+@pytest.mark.django_db
+def test_license_feature_assign_endpoint_selects_role_license(api_client, non_staff_user):
+    agreement = CustomerAgreementFactory.create()
+    plan = SubscriptionPlanFactory.create(customer_agreement=agreement)
+    role = FeatureRoleFactory.create(slug='ai_chatbot.user', name='AI Chatbot User')
+
+    target_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=localized_utcnow() + datetime.timedelta(days=30),
+    )
+    target_license.feature_roles.add(role)
+
+    _assign_role_via_jwt_or_db(
+        api_client,
+        non_staff_user,
+        agreement.enterprise_customer_uuid,
+        assign_via_jwt=True,
+    )
+
+    response = api_client.post(
+        reverse('api:v1:license-feature-assign'),
+        data={
+            'enterprise_id': str(agreement.enterprise_customer_uuid),
+            'user_email': 'role-only@example.com',
+            'role_slug': role.slug,
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert str(response.data['license_id']) == str(target_license.uuid)
+    assert response.data['granted_roles'] == [role.slug]
+
+
+@pytest.mark.django_db
+def test_license_feature_assign_endpoint_intersection(api_client, non_staff_user):
+    agreement = CustomerAgreementFactory.create()
+    plan = SubscriptionPlanFactory.create(customer_agreement=agreement)
+    permission = FeaturePermission.objects.create(slug='ai_chatbot.access', name='AI Chatbot Access')
+    role = FeatureRoleFactory.create(slug='ai_chatbot.user', name='AI Chatbot User')
+
+    permission_only = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=localized_utcnow() + datetime.timedelta(days=30),
+    )
+    permission_only.feature_permissions.add(permission)
+
+    target_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=localized_utcnow() + datetime.timedelta(days=30),
+    )
+    target_license.feature_permissions.add(permission)
+    target_license.feature_roles.add(role)
+
+    _assign_role_via_jwt_or_db(
+        api_client,
+        non_staff_user,
+        agreement.enterprise_customer_uuid,
+        assign_via_jwt=True,
+    )
+
+    response = api_client.post(
+        reverse('api:v1:license-feature-assign'),
+        data={
+            'enterprise_id': str(agreement.enterprise_customer_uuid),
+            'user_email': 'intersection@example.com',
+            'feature_slug': permission.slug,
+            'role_slug': role.slug,
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert str(response.data['license_id']) == str(target_license.uuid)
+    assert response.data['granted_permissions'] == [permission.slug]
+    assert response.data['granted_roles'] == [role.slug]
+
+
+@pytest.mark.django_db
+def test_license_feature_assign_endpoint_intersection_failure_returns_409(api_client, non_staff_user):
+    agreement = CustomerAgreementFactory.create()
+    plan = SubscriptionPlanFactory.create(customer_agreement=agreement)
+    permission = FeaturePermission.objects.create(slug='ai_chatbot.access', name='AI Chatbot Access')
+    role = FeatureRoleFactory.create(slug='ai_chatbot.user', name='AI Chatbot User')
+
+    permission_only = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=localized_utcnow() + datetime.timedelta(days=30),
+    )
+    permission_only.feature_permissions.add(permission)
+
+    _assign_role_via_jwt_or_db(
+        api_client,
+        non_staff_user,
+        agreement.enterprise_customer_uuid,
+        assign_via_jwt=True,
+    )
+
+    response = api_client.post(
+        reverse('api:v1:license-feature-assign'),
+        data={
+            'enterprise_id': str(agreement.enterprise_customer_uuid),
+            'user_email': 'intersection-failure@example.com',
+            'feature_slug': permission.slug,
+            'role_slug': role.slug,
+        },
+    )
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert response.data['detail'] == 'No available license matching requested permission/role'

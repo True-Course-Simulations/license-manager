@@ -18,6 +18,7 @@ from license_manager.apps.subscriptions.exceptions import (
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
     FeaturePermission,
+    FeatureRole,
     License,
     SubscriptionPlan,
     SubscriptionPlanRenewal,
@@ -58,6 +59,7 @@ class MinimalSubscriptionPlanSerializer(serializers.ModelSerializer):
 
     plan_type = serializers.CharField(source='product.plan_type', read_only=True)
     feature_permissions = serializers.SerializerMethodField()
+    feature_roles = serializers.SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -83,11 +85,15 @@ class MinimalSubscriptionPlanSerializer(serializers.ModelSerializer):
             'created',
             'plan_type',
             'feature_permissions',
+            'feature_roles',
             'salesforce_opportunity_line_item',
         ]
 
     def get_feature_permissions(self, obj):
         return sorted(obj.feature_permissions.values_list('slug', flat=True))
+
+    def get_feature_roles(self, obj):
+        return sorted(obj.feature_roles.values_list('slug', flat=True))
 
 
 class SubscriptionPlanSerializer(MinimalSubscriptionPlanSerializer):
@@ -162,6 +168,11 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
         many=True,
         required=False,
     )
+    feature_roles = serializers.PrimaryKeyRelatedField(
+        queryset=FeatureRole.objects.all(),
+        many=True,
+        required=False,
+    )
 
     is_revocation_cap_enabled = serializers.BooleanField(
         required=False, default=False)
@@ -184,6 +195,7 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
             'customer_agreement',
             'desired_num_licenses',
             'feature_permissions',
+            'feature_roles',
             'expiration_processed',
             'for_internal_use_only',
             'last_freeze_timestamp',
@@ -203,9 +215,12 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
 
         change_reason = validated_data.pop('change_reason')
         feature_permissions = validated_data.pop('feature_permissions', [])
+        feature_roles = validated_data.pop('feature_roles', [])
         instance = SubscriptionPlan.objects.create(**validated_data)
         if feature_permissions:
             instance.feature_permissions.set(feature_permissions)
+        if feature_roles:
+            instance.feature_roles.set(feature_roles)
         instance._change_reason = change_reason  # pylint: disable=protected-access
         instance.save()
         return instance
@@ -323,6 +338,7 @@ class SubscriptionPlanUpdateSerializer(SubscriptionPlanCreateSerializer):
             'customer_agreement',
             'desired_num_licenses',
             'feature_permissions',
+            'feature_roles',
             'expiration_processed',
             'last_freeze_timestamp',
             'num_revocations_applied',
@@ -782,6 +798,24 @@ class LicenseAdminAssignActionSerializer(CustomTextWithMultipleEmailsSerializer)
             'notify_users',
         ]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not is_salesforce_integration_enabled():
+            self.fields.pop('user_sfids', None)
+
+    def validate(self, attrs):
+        user_emails = attrs.get('user_emails')
+        user_sfids = attrs.get('user_sfids')
+
+        if user_sfids:
+            # if saleforce ids list is present then its length must be equal to number of user emails
+            if len(user_emails) != len(user_sfids):
+                raise serializers.ValidationError(
+                    'Number of Salesforce IDs did not match number of provided user emails.'
+                )
+
+        return super().validate(attrs)
+
 
 class LicenseAvailabilityQueryParamsSerializer(serializers.Serializer):  # pylint: disable=abstract-method
     """
@@ -811,6 +845,7 @@ class LicenseFeatureAssignRequestSerializer(serializers.Serializer):  # pylint: 
     user_id = serializers.IntegerField(required=False)
     user_email = serializers.EmailField(required=False)
     feature_slug = serializers.CharField(required=False, allow_blank=False)
+    role_slug = serializers.CharField(required=False, allow_blank=False)
     plan_id = serializers.UUIDField(required=False)
 
     class Meta:
@@ -820,6 +855,7 @@ class LicenseFeatureAssignRequestSerializer(serializers.Serializer):  # pylint: 
             'user_id',
             'user_email',
             'feature_slug',
+            'role_slug',
             'plan_id',
         ]
 
@@ -830,11 +866,8 @@ class LicenseFeatureAssignRequestSerializer(serializers.Serializer):  # pylint: 
         if not attrs.get('user_id') and not attrs.get('user_email'):
             raise serializers.ValidationError('user_id or user_email is required.')
 
-        if attrs.get('feature_slug') and attrs.get('plan_id'):
-            return attrs
-
-        if not attrs.get('feature_slug') and not attrs.get('plan_id'):
-            raise serializers.ValidationError('Provide feature_slug or plan_id.')
+        if not attrs.get('feature_slug') and not attrs.get('role_slug') and not attrs.get('plan_id'):
+            raise serializers.ValidationError('Provide feature_slug, role_slug, or plan_id.')
 
         return attrs
 
@@ -844,27 +877,15 @@ class LicenseFeatureAssignResponseSerializer(serializers.Serializer):  # pylint:
     Response serializer for feature-aware assignment endpoint.
     """
     license_id = serializers.UUIDField()
+    granted_permissions = serializers.ListField(
+        child=serializers.CharField(),
+    )
+    granted_roles = serializers.ListField(
+        child=serializers.CharField(),
+    )
     granted_feature_slugs = serializers.ListField(
         child=serializers.CharField(),
     )
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if not is_salesforce_integration_enabled():
-            self.fields.pop('user_sfids', None)
-
-    def validate(self, attrs):
-        user_emails = attrs.get('user_emails')
-        user_sfids = attrs.get('user_sfids')
-
-        if user_sfids:
-            # if saleforce ids list is present then its length must be equal to number of user emails
-            if len(user_emails) != len(user_sfids):
-                raise serializers.ValidationError(
-                    'Number of Salesforce IDs did not match number of provided user emails.'
-                )
-
-        return super().validate(attrs)
 
 
 class EnterpriseEnrollmentWithLicenseSubsidyQueryParamsSerializer(serializers.Serializer):  # pylint: disable=abstract-method

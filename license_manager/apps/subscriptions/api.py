@@ -123,6 +123,8 @@ def renew_subscription(subscription_plan_renewal, is_auto_renewed=False):
         future_plan.save()
         if original_plan.feature_permissions.exists() and not future_plan.feature_permissions.exists():
             future_plan.feature_permissions.set(original_plan.feature_permissions.all())
+        if original_plan.feature_roles.exists() and not future_plan.feature_roles.exists():
+            future_plan.feature_roles.set(original_plan.feature_roles.all())
         future_plan.increase_num_licenses(
             subscription_plan_renewal.number_of_licenses - future_plan.num_licenses
         )
