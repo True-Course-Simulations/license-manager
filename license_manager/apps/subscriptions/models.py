@@ -555,6 +555,36 @@ class Notification(TimeStampedModel):
     history = HistoricalRecords()
 
 
+class FeaturePermission(TimeStampedModel):
+    """
+    Represents a feature entitlement that can be attached to plans/licenses.
+
+    .. no_pii: This model has no PII
+    """
+
+    slug = models.CharField(
+        max_length=255,
+        unique=True,
+        db_index=True,
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=False,
+        null=False,
+    )
+    description = models.TextField(
+        blank=True,
+        null=True,
+    )
+
+    class Meta:
+        verbose_name = _("Feature Permission")
+        verbose_name_plural = _("Feature Permissions")
+
+    def __str__(self):
+        return self.slug
+
+
 class SubscriptionPlan(TimeStampedModel):
     """
     Stores top-level information related to an enterprise Subscriptions purchase.
@@ -691,6 +721,12 @@ class SubscriptionPlan(TimeStampedModel):
             "The total license count (provisioned asynchronously) will reach the desired amount eventually. "
             "Empty (NULL) means no attempts will be made to asynchronously provision licenses."
         ),
+    )
+
+    feature_permissions = models.ManyToManyField(
+        FeaturePermission,
+        blank=True,
+        related_name='plans',
     )
 
     @classmethod
@@ -987,8 +1023,13 @@ class SubscriptionPlan(TimeStampedModel):
         """
         Method to increase the number of licenses associated with an instance of SubscriptionPlan by num_new_licenses.
         """
-        new_licenses = [License(subscription_plan=self) for _ in range(num_new_licenses)]
-        License.bulk_create(new_licenses)
+        # Local import to avoid circular import at module import time.
+        from license_manager.apps.subscriptions.services.licenses import create_licenses_for_purchase
+
+        create_licenses_for_purchase(
+            plan=self,
+            quantity=num_new_licenses,
+        )
 
     def provision_licenses(self):
         """
@@ -1292,6 +1333,24 @@ class License(TimeStampedModel):
         help_text="Whether or not License was auto-applied.",
     )
 
+    expires_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="When null, the license is perpetual.",
+    )
+
+    consumption_date = models.DateTimeField(
+        blank=True,
+        null=True,
+        help_text="Set when this license is first assigned/consumed.",
+    )
+
+    feature_permissions = models.ManyToManyField(
+        FeaturePermission,
+        blank=True,
+        related_name='licenses',
+    )
+
     history = HistoricalRecords()
 
     def __str__(self):
@@ -1313,7 +1372,7 @@ class License(TimeStampedModel):
         """
         super().clean()
 
-        if self.status in [ASSIGNED, ACTIVATED]:
+        if self.status in [ASSIGNED, ACTIVATED] and self.user_email:
             has_existing_license = License.objects.filter(
                 user_email=self.user_email,
                 status__in=[ASSIGNED, ACTIVATED],
@@ -1324,6 +1383,17 @@ class License(TimeStampedModel):
                 raise ValidationError(
                     f'User with email {self.user_email} already has an assigned or activated license.'
                 )
+
+        if not self._state.adding and self.pk:
+            current = License.objects.filter(pk=self.pk).only('consumption_date', 'user_email').first()
+            if (
+                current
+                and current.consumption_date is not None
+                and current.user_email
+                and self.user_email
+                and current.user_email.lower() != self.user_email.lower()
+            ):
+                raise ValidationError('This consumed license is non-transferable and cannot be reassigned.')
 
     def save(self, *args, **kwargs):
         """
@@ -1341,6 +1411,14 @@ class License(TimeStampedModel):
             self.subscription_plan.customer_agreement.enterprise_customer_slug,
             self.activation_key,
         )
+
+    @property
+    def is_perpetual(self):
+        return self.expires_at is None
+
+    @property
+    def is_expired(self):
+        return self.expires_at is not None and timezone.now() > self.expires_at
 
     @property
     def renewed_from(self):

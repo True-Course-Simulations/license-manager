@@ -17,6 +17,7 @@ from license_manager.apps.subscriptions.exceptions import (
 )
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
+    FeaturePermission,
     License,
     SubscriptionPlan,
     SubscriptionPlanRenewal,
@@ -56,6 +57,7 @@ class MinimalSubscriptionPlanSerializer(serializers.ModelSerializer):
     )
 
     plan_type = serializers.CharField(source='product.plan_type', read_only=True)
+    feature_permissions = serializers.SerializerMethodField()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,8 +82,12 @@ class MinimalSubscriptionPlanSerializer(serializers.ModelSerializer):
             'should_auto_apply_licenses',
             'created',
             'plan_type',
+            'feature_permissions',
             'salesforce_opportunity_line_item',
         ]
+
+    def get_feature_permissions(self, obj):
+        return sorted(obj.feature_permissions.values_list('slug', flat=True))
 
 
 class SubscriptionPlanSerializer(MinimalSubscriptionPlanSerializer):
@@ -151,6 +157,11 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
         required=False, allow_null=True)
     desired_num_licenses = serializers.IntegerField(required=True)
     customer_agreement = serializers.UUIDField(required=True)
+    feature_permissions = serializers.PrimaryKeyRelatedField(
+        queryset=FeaturePermission.objects.all(),
+        many=True,
+        required=False,
+    )
 
     is_revocation_cap_enabled = serializers.BooleanField(
         required=False, default=False)
@@ -172,6 +183,7 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
             'can_freeze_unused_licenses',
             'customer_agreement',
             'desired_num_licenses',
+            'feature_permissions',
             'expiration_processed',
             'for_internal_use_only',
             'last_freeze_timestamp',
@@ -190,7 +202,10 @@ class SubscriptionPlanCreateSerializer(SubscriptionPlanSerializer):
         """
 
         change_reason = validated_data.pop('change_reason')
+        feature_permissions = validated_data.pop('feature_permissions', [])
         instance = SubscriptionPlan.objects.create(**validated_data)
+        if feature_permissions:
+            instance.feature_permissions.set(feature_permissions)
         instance._change_reason = change_reason  # pylint: disable=protected-access
         instance.save()
         return instance
@@ -307,6 +322,7 @@ class SubscriptionPlanUpdateSerializer(SubscriptionPlanCreateSerializer):
             'title',
             'customer_agreement',
             'desired_num_licenses',
+            'feature_permissions',
             'expiration_processed',
             'last_freeze_timestamp',
             'num_revocations_applied',
@@ -765,6 +781,72 @@ class LicenseAdminAssignActionSerializer(CustomTextWithMultipleEmailsSerializer)
         fields = CustomTextWithMultipleEmailsSerializer.Meta.fields + [
             'notify_users',
         ]
+
+
+class LicenseAvailabilityQueryParamsSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """
+    Query parameters for feature-based license availability.
+    """
+    enterprise_id = serializers.UUIDField(required=False)
+    enterprise_customer_uuid = serializers.UUIDField(required=False)
+
+    class Meta:
+        fields = [
+            'enterprise_id',
+            'enterprise_customer_uuid',
+        ]
+
+    def validate(self, attrs):
+        if not attrs.get('enterprise_id') and not attrs.get('enterprise_customer_uuid'):
+            raise serializers.ValidationError('enterprise_id or enterprise_customer_uuid is required.')
+        return attrs
+
+
+class LicenseFeatureAssignRequestSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """
+    Request serializer for assigning a feature-aware license seat.
+    """
+    enterprise_id = serializers.UUIDField(required=False)
+    enterprise_customer_uuid = serializers.UUIDField(required=False)
+    user_id = serializers.IntegerField(required=False)
+    user_email = serializers.EmailField(required=False)
+    feature_slug = serializers.CharField(required=False, allow_blank=False)
+    plan_id = serializers.UUIDField(required=False)
+
+    class Meta:
+        fields = [
+            'enterprise_id',
+            'enterprise_customer_uuid',
+            'user_id',
+            'user_email',
+            'feature_slug',
+            'plan_id',
+        ]
+
+    def validate(self, attrs):
+        if not attrs.get('enterprise_id') and not attrs.get('enterprise_customer_uuid'):
+            raise serializers.ValidationError('enterprise_id or enterprise_customer_uuid is required.')
+
+        if not attrs.get('user_id') and not attrs.get('user_email'):
+            raise serializers.ValidationError('user_id or user_email is required.')
+
+        if attrs.get('feature_slug') and attrs.get('plan_id'):
+            return attrs
+
+        if not attrs.get('feature_slug') and not attrs.get('plan_id'):
+            raise serializers.ValidationError('Provide feature_slug or plan_id.')
+
+        return attrs
+
+
+class LicenseFeatureAssignResponseSerializer(serializers.Serializer):  # pylint: disable=abstract-method
+    """
+    Response serializer for feature-aware assignment endpoint.
+    """
+    license_id = serializers.UUIDField()
+    granted_feature_slugs = serializers.ListField(
+        child=serializers.CharField(),
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

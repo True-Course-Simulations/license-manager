@@ -7,9 +7,10 @@ from uuid import uuid4
 from celery import chain
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, ValidationError as DjangoValidationError
 from django.db import DatabaseError, transaction
-from django.db.models import Count
+from django.db.models import Count, Q
+from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, extend_schema_view
@@ -64,12 +65,16 @@ from license_manager.apps.subscriptions.exceptions import (
 )
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
+    FeaturePermission,
     License,
     SubscriptionLicenseSource,
     SubscriptionLicenseSourceType,
     SubscriptionPlan,
     SubscriptionPlanRenewal,
     SubscriptionsRoleAssignment,
+)
+from license_manager.apps.subscriptions.services.licenses import (
+    assign_license,
 )
 from license_manager.apps.subscriptions.utils import (
     chunks,
@@ -94,6 +99,28 @@ ESTIMATED_COUNT_PAGINATOR_THRESHOLD = 10000
 SUBSCRIPTION_PLAN_RENEWAL_PROVISIONING_ADMIN_CRUD_API_TAG = "Subscription Plan Renewal CRUD (for Provisioning Admins)"
 SUBSCRIPTION_PLAN_PROVISIONING_ADMIN_CRUD_API_TAG = "Subscription Plan CRUD (for Provisioning Admins)"
 CUSTOMER_AGREEMENT_PROVISIONING_ADMIN_CRUD_API_TAG = "Customer Agreement CRUD (for Provisioning Admins)"
+
+
+def _get_enterprise_context_from_request(request):
+    """
+    Resolve enterprise UUID context from query params or request body.
+    """
+    enterprise_id = (
+        request.query_params.get('enterprise_id')
+        or request.query_params.get('enterprise_customer_uuid')
+        or request.data.get('enterprise_id')
+        or request.data.get('enterprise_customer_uuid')
+    )
+    if not enterprise_id:
+        raise ParseError('enterprise_id or enterprise_customer_uuid is required.')
+
+    try:
+        customer_agreement = CustomerAgreement.objects.get(
+            enterprise_customer_uuid=enterprise_id,
+        )
+    except CustomerAgreement.DoesNotExist as exc:
+        raise ParseError('No customer agreement found for the provided enterprise identifier.') from exc
+    return customer_agreement.enterprise_customer_uuid
 
 
 @extend_schema_view(
@@ -1019,23 +1046,16 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
 
         Returns a QuerySet of licenses that are assigned.
         """
-        licenses = subscription_plan.unassigned_licenses[:len(user_emails)]
-        now = localized_utcnow()
-        for unassigned_license, email in zip(licenses, user_emails):
-            # Assign each email to a license and mark the license as assigned
-            unassigned_license.user_email = email
-            unassigned_license.status = constants.ASSIGNED
-            unassigned_license.activation_key = str(uuid4())
-            unassigned_license.assigned_date = now
-            unassigned_license.last_remind_date = now
-
-        License.bulk_update(
-            licenses,
-            ['user_email', 'status', 'activation_key', 'assigned_date', 'last_remind_date'],
-            batch_size=10,
-        )
-
-        return licenses
+        available_licenses = subscription_plan.unassigned_licenses.filter(
+            consumption_date__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gte=timezone.now()),
+        )[:len(user_emails)]
+        assigned_licenses = []
+        for unassigned_license, email in zip(available_licenses, user_emails):
+            assignment_result = assign_license(unassigned_license, {'email': email})
+            assigned_licenses.append(assignment_result['license'])
+        return assigned_licenses
 
     def _set_source_for_assigned_licenses(self, assigned_licenses, emails_and_sfids):
         """
@@ -1139,7 +1159,11 @@ class LicenseAdminViewSet(BaseLicenseViewSet):
         if user_emails:
             try:
                 with transaction.atomic():
-                    available_licenses_count = subscription_plan.unassigned_licenses.count()
+                    available_licenses_count = subscription_plan.unassigned_licenses.filter(
+                        consumption_date__isnull=True,
+                    ).filter(
+                        Q(expires_at__isnull=True) | Q(expires_at__gte=timezone.now()),
+                    ).count()
                     required_licenses_count = len(user_emails)
 
                     if available_licenses_count < required_licenses_count:
@@ -1802,6 +1826,134 @@ class LicenseSubsidyView(LicenseBaseView):
             'specified enterprise UUID.'
         )
         return Response(msg, status=status.HTTP_404_NOT_FOUND)
+
+
+class LicenseAvailabilityByFeatureView(APIView):
+    """
+    Returns license availability grouped by feature permission.
+    """
+    authentication_classes = [JwtAuthentication, SessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @permission_required(
+        constants.SUBSCRIPTIONS_ADMIN_LEARNER_ACCESS_PERMISSION,
+        fn=_get_enterprise_context_from_request,
+    )
+    @extend_schema(
+        parameters=[serializers.LicenseAvailabilityQueryParamsSerializer],
+    )
+    def get(self, request):
+        query_serializer = serializers.LicenseAvailabilityQueryParamsSerializer(
+            data=request.query_params,
+        )
+        query_serializer.is_valid(raise_exception=True)
+
+        enterprise_uuid = (
+            query_serializer.validated_data.get('enterprise_id')
+            or query_serializer.validated_data.get('enterprise_customer_uuid')
+        )
+        now = timezone.now()
+        features = FeaturePermission.objects.filter(
+            licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+        ).annotate(
+            total=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                ),
+                distinct=True,
+            ),
+            consumed=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                    licenses__consumption_date__isnull=False,
+                ),
+                distinct=True,
+            ),
+            remaining=Count(
+                'licenses',
+                filter=Q(
+                    licenses__subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+                    licenses__consumption_date__isnull=True,
+                ) & (Q(licenses__expires_at__isnull=True) | Q(licenses__expires_at__gte=now)),
+                distinct=True,
+            ),
+            ).order_by('slug')
+
+        response_data = {
+            'feature_permissions': {
+                feature.slug: {
+                    'total': feature.total,
+                    'consumed': feature.consumed,
+                    'remaining': feature.remaining,
+                } for feature in features
+            }
+        }
+        return Response(response_data, status=status.HTTP_200_OK)
+
+
+class LicenseFeatureAssignView(APIView):
+    """
+    Assign a license by requested feature or plan.
+    """
+    authentication_classes = [JwtAuthentication, SessionAuthentication]
+    permission_classes = [permissions.IsAuthenticated]
+
+    @permission_required(
+        constants.SUBSCRIPTIONS_ADMIN_LEARNER_ACCESS_PERMISSION,
+        fn=_get_enterprise_context_from_request,
+    )
+    @extend_schema(
+        request=serializers.LicenseFeatureAssignRequestSerializer,
+        responses={status.HTTP_200_OK: serializers.LicenseFeatureAssignResponseSerializer},
+    )
+    def post(self, request):
+        request_serializer = serializers.LicenseFeatureAssignRequestSerializer(data=request.data)
+        request_serializer.is_valid(raise_exception=True)
+        payload = request_serializer.validated_data
+
+        enterprise_uuid = payload.get('enterprise_id') or payload.get('enterprise_customer_uuid')
+        now = timezone.now()
+
+        available_licenses = License.objects.filter(
+            subscription_plan__customer_agreement__enterprise_customer_uuid=enterprise_uuid,
+            consumption_date__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gte=now),
+        )
+
+        if payload.get('feature_slug'):
+            available_licenses = available_licenses.filter(
+                feature_permissions__slug=payload['feature_slug'],
+            )
+        if payload.get('plan_id'):
+            available_licenses = available_licenses.filter(
+                subscription_plan_id=payload['plan_id'],
+            )
+
+        candidate_license = available_licenses.order_by('created').first()
+        if not candidate_license:
+            return Response(
+                {'detail': 'No matching unconsumed active license is available.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            assignment_result = assign_license(candidate_license, {
+                'email': payload.get('user_email'),
+                'lms_user_id': payload.get('user_id'),
+            })
+        except (DjangoValidationError, ValidationError) as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'license_id': assignment_result['license'].uuid,
+                'granted_feature_slugs': assignment_result['granted_feature_slugs'],
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class LicenseActivationView(LicenseBaseView):

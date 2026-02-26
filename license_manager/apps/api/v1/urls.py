@@ -105,6 +105,16 @@ subscription_router.register(
 
 urlpatterns = [
     re_path(
+        r'licenses/availability',
+        views.LicenseAvailabilityByFeatureView.as_view(),
+        name='license-feature-availability',
+    ),
+    re_path(
+        r'licenses/assign',
+        views.LicenseFeatureAssignView.as_view(),
+        name='license-feature-assign',
+    ),
+    re_path(
         r'bulk-license-enrollment',
         views.EnterpriseEnrollmentWithLicenseSubsidyView.as_view(),
         name='bulk-license-enrollment',

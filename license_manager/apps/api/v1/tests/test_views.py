@@ -45,6 +45,7 @@ from license_manager.apps.subscriptions import constants
 from license_manager.apps.subscriptions.exceptions import LicenseRevocationError
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
+    FeaturePermission,
     License,
     SubscriptionLicenseSource,
     SubscriptionsFeatureRole,
@@ -4740,3 +4741,122 @@ class AdminLicenseLookupViewSetTestCase(LicenseViewTestMixin, TestCase):
         self.assertIn("results", response.data)
         self.assertEqual(response.data["count"], 0)
         self.assertEqual(response.data["results"], [])
+
+
+@pytest.mark.django_db
+def test_license_feature_availability_endpoint_counts(api_client, non_staff_user):
+    """
+    Verify feature availability counts include perpetual licenses and exclude expired time-limited seats from remaining.
+    """
+    agreement = CustomerAgreementFactory.create()
+    plan = SubscriptionPlanFactory.create(customer_agreement=agreement)
+
+    feature_a = FeaturePermission.objects.create(slug='ai_chatbot.access', name='AI Chatbot Access')
+    feature_b = FeaturePermission.objects.create(slug='analytics.view_dashboard', name='View Dashboard')
+
+    now = localized_utcnow()
+    perpetual_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=None,
+    )
+    consumed_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.ASSIGNED,
+        consumption_date=now,
+        assigned_date=now,
+        expires_at=now + datetime.timedelta(days=30),
+    )
+    expired_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=now - datetime.timedelta(days=1),
+    )
+    feature_b_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=now + datetime.timedelta(days=2),
+    )
+
+    perpetual_license.feature_permissions.add(feature_a)
+    consumed_license.feature_permissions.add(feature_a)
+    expired_license.feature_permissions.add(feature_a)
+    feature_b_license.feature_permissions.add(feature_b)
+
+    _assign_role_via_jwt_or_db(
+        api_client,
+        non_staff_user,
+        agreement.enterprise_customer_uuid,
+        assign_via_jwt=True,
+    )
+
+    url = reverse('api:v1:license-feature-availability')
+    response = api_client.get(url, {'enterprise_id': agreement.enterprise_customer_uuid})
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.data['feature_permissions']['ai_chatbot.access'] == {
+        'total': 3,
+        'consumed': 1,
+        'remaining': 1,
+    }
+    assert response.data['feature_permissions']['analytics.view_dashboard'] == {
+        'total': 1,
+        'consumed': 0,
+        'remaining': 1,
+    }
+
+
+@pytest.mark.django_db
+def test_license_feature_assign_endpoint_selects_feature_license(api_client, non_staff_user):
+    """
+    Verify assigning with feature_slug chooses a matching available license.
+    """
+    agreement = CustomerAgreementFactory.create()
+    plan = SubscriptionPlanFactory.create(customer_agreement=agreement)
+    feature = FeaturePermission.objects.create(slug='ai_chatbot.access', name='AI Chatbot Access')
+    other_feature = FeaturePermission.objects.create(slug='analytics.view_dashboard', name='View Dashboard')
+
+    now = localized_utcnow()
+    target_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=now + datetime.timedelta(days=30),
+    )
+    non_matching_license = LicenseFactory.create(
+        subscription_plan=plan,
+        status=constants.UNASSIGNED,
+        consumption_date=None,
+        expires_at=now + datetime.timedelta(days=30),
+    )
+    target_license.feature_permissions.add(feature)
+    non_matching_license.feature_permissions.add(other_feature)
+
+    _assign_role_via_jwt_or_db(
+        api_client,
+        non_staff_user,
+        agreement.enterprise_customer_uuid,
+        assign_via_jwt=True,
+    )
+
+    url = reverse('api:v1:license-feature-assign')
+    learner_email = 'feature-seat-user@example.com'
+    response = api_client.post(
+        url,
+        data={
+            'enterprise_id': str(agreement.enterprise_customer_uuid),
+            'user_email': learner_email,
+            'feature_slug': feature.slug,
+        },
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert str(response.data['license_id']) == str(target_license.uuid)
+    assert response.data['granted_feature_slugs'] == [feature.slug]
+
+    target_license.refresh_from_db()
+    assert target_license.consumption_date is not None
+    assert target_license.user_email == learner_email

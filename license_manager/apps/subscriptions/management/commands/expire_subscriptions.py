@@ -10,6 +10,7 @@ from license_manager.apps.subscriptions.constants import (
     LICENSE_EXPIRATION_BATCH_SIZE,
 )
 from license_manager.apps.subscriptions.models import SubscriptionPlan
+from license_manager.apps.subscriptions.services.licenses import expire_time_limited_licenses
 from license_manager.apps.subscriptions.utils import (
     chunks,
     localized_datetime_from_datetime,
@@ -153,6 +154,10 @@ class Command(BaseCommand):
                 return
 
         if not options['dry_run']:
+            expired_time_limited_count = expire_time_limited_licenses()
+            if expired_time_limited_count:
+                logger.info('Expired %s time-limited licenses.', expired_time_limited_count)
+
             for expired_subscription_plan in expired_subscription_plans:
                 renewal_for_plan = expired_subscription_plan.get_renewal()
 

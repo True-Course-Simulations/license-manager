@@ -373,3 +373,36 @@ class ExpireSubscriptionsCommandTests(TestCase):
         assert set(args_2) == set(self._get_allocated_license_uuids(expired_subscription_plan_1))
         assert set(args_3) == set(self._get_allocated_license_uuids(expired_subscription_plan_2))
         assert mock_license_expiration_task.call_count == 3
+
+    @mock.patch('license_manager.apps.subscriptions.event_utils.track_event')
+    @mock.patch(
+        'license_manager.apps.subscriptions.management.commands.expire_subscriptions.license_expiration_task'
+    )
+    def test_time_limited_expiry_ignores_perpetual_licenses(self, mock_license_expiration_task, mock_track_event):
+        """
+        Verifies the time-limited license expiry service invoked by the command does not expire perpetual licenses.
+        """
+        expired_subscription = self._create_expired_plan_with_licenses(
+            unassigned_licenses_count=0,
+            assigned_licenses_count=0,
+            activated_licenses_count=0,
+            revoked_licenses_count=0,
+        )
+        now = localized_utcnow()
+        perpetual = LicenseFactory.create(
+            subscription_plan=expired_subscription,
+            status=ASSIGNED,
+            expires_at=None,
+        )
+        expired_time_limited = LicenseFactory.create(
+            subscription_plan=expired_subscription,
+            status=ASSIGNED,
+            expires_at=now - timedelta(days=1),
+        )
+
+        call_command(self.command_name)
+
+        perpetual.refresh_from_db()
+        expired_time_limited.refresh_from_db()
+        assert perpetual.status == ASSIGNED
+        assert expired_time_limited.status == REVOKED

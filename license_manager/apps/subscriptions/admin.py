@@ -5,11 +5,12 @@ from django.conf import settings
 from django.contrib import admin, messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist
-from django.db import connection, transaction
+from django.db import connection, models, transaction
 from django.http import HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils.safestring import mark_safe
+from django.utils import timezone
 from djangoql.admin import DjangoQLSearchMixin
 from pytz import UTC
 from simple_history.admin import SimpleHistoryAdmin
@@ -33,6 +34,7 @@ from license_manager.apps.subscriptions.forms import (
 from license_manager.apps.subscriptions.models import (
     CustomerAgreement,
     CustomSubscriptionExpirationMessaging,
+    FeaturePermission,
     License,
     LicenseEvent,
     LicenseTransferJob,
@@ -126,6 +128,61 @@ def _bulk_delete_request_handler(request, queryset, model_name, table_name, dele
         return HttpResponseRedirect(request.get_full_path())
 
 
+class PerpetualLicenseFilter(admin.SimpleListFilter):
+    title = 'perpetual'
+    parameter_name = 'perpetual'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('yes', 'Perpetual'),
+            ('no', 'Time-limited'),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == 'yes':
+            return queryset.filter(expires_at__isnull=True)
+        if self.value() == 'no':
+            return queryset.filter(expires_at__isnull=False)
+        return queryset
+
+
+class ExpiredLicenseFilter(admin.SimpleListFilter):
+    title = 'expired'
+    parameter_name = 'expired'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('yes', 'Expired'),
+            ('no', 'Active'),
+        )
+
+    def queryset(self, request, queryset):
+        now = timezone.now()
+        if self.value() == 'yes':
+            return queryset.filter(expires_at__isnull=False, expires_at__lt=now)
+        if self.value() == 'no':
+            return queryset.filter(models.Q(expires_at__isnull=True) | models.Q(expires_at__gte=now))
+        return queryset
+
+
+class ConsumedLicenseFilter(admin.SimpleListFilter):
+    title = 'consumed'
+    parameter_name = 'consumed'
+
+    def lookups(self, request, model_admin):
+        return (
+            ('yes', 'Consumed'),
+            ('no', 'Unconsumed'),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == 'yes':
+            return queryset.filter(consumption_date__isnull=False)
+        if self.value() == 'no':
+            return queryset.filter(consumption_date__isnull=True)
+        return queryset
+
+
 @admin.register(License)
 class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
     readonly_fields = [
@@ -135,12 +192,17 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         'auto_applied',
         'source_id',
         'source_type',
+        'feature_permission_slugs',
     ]
     exclude = ['history', 'renewed_to']
     list_display = (
         'uuid',
         'get_subscription_plan_title',
         'status',
+        'expires_at',
+        'is_perpetual',
+        'is_expired',
+        'consumption_date',
         'assigned_date',
         'activation_date',
         'user_email',
@@ -152,6 +214,9 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
     )
     list_filter = (
         'status',
+        PerpetualLicenseFilter,
+        ExpiredLicenseFilter,
+        ConsumedLicenseFilter,
     )
     search_fields = (
         'uuid__startswith',
@@ -162,6 +227,10 @@ class LicenseAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
     )
 
     actions = ['revert_licenses_to_snapshot_time', 'delete_bulk_licenses']
+
+    @admin.display(description='Feature permissions')
+    def feature_permission_slugs(self, instance):
+        return ', '.join(sorted(instance.feature_permissions.values_list('slug', flat=True)))
 
     def get_queryset(self, request):
         """
@@ -313,6 +382,7 @@ class SubscriptionPlanAdmin(DjangoQLSearchMixin, SimpleHistoryAdmin):
         'start_date',
         'expiration_date',
         'enterprise_catalog_uuid',
+        'feature_permissions',
         'salesforce_opportunity_line_item',
         'product',
         'revoke_max_percentage',
@@ -522,6 +592,18 @@ class CustomSubscriptionExpirationMessagingAdmin(DjangoQLSearchMixin, admin.Mode
     list_display = (
         'customer_agreement',
         'has_custom_license_expiration_messaging',
+    )
+
+
+@admin.register(FeaturePermission)
+class FeaturePermissionAdmin(admin.ModelAdmin):
+    list_display = (
+        'slug',
+        'name',
+    )
+    search_fields = (
+        'slug',
+        'name',
     )
 
 

@@ -121,6 +121,8 @@ def renew_subscription(subscription_plan_renewal, is_auto_renewed=False):
 
     with transaction.atomic():
         future_plan.save()
+        if original_plan.feature_permissions.exists() and not future_plan.feature_permissions.exists():
+            future_plan.feature_permissions.set(original_plan.feature_permissions.all())
         future_plan.increase_num_licenses(
             subscription_plan_renewal.number_of_licenses - future_plan.num_licenses
         )
